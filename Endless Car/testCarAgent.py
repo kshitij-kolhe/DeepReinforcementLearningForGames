@@ -13,16 +13,16 @@ def test():
     agent = Agent()
     game = CARGAME()
     graph = Plot()
-    agent.model.load_state_dict(torch.load("carAIModel.pth"))
-    agent.model.eval()
+    agent.brain.load_state_dict(torch.load("carAIModel.pth"))
+    agent.brain.eval()
 
     while agent.numberOfGames < 20:
             
         action = [0,0,0]
         state = agent.getGameState(game)
         stateTensor = torch.tensor(state, dtype=torch.float)
-        stateTensor = stateTensor.to(agent.device)
-        predictedAction = agent.model(stateTensor)
+        stateTensor = stateTensor.to(agent.gpu)
+        predictedAction = agent.brain(stateTensor)
         action[torch.argmax(predictedAction).item()] = 1
         gameOver, score, reward = game.performAction(action)
 

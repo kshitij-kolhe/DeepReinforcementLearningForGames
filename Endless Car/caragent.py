@@ -26,27 +26,18 @@ class CARAI(nn.Module):
 
 
 class DRLTrainer:
-    def __init__(self, model, lr, gamma):
+    def __init__(self, gamma, model, lr):
         self.learningRate = lr
         self.gamma = gamma
         self.model = model
         self.optimizer = optim.Adam(model.parameters(), lr=self.learningRate)
         self.criterion = nn.MSELoss()
 
-    def train_step(self, currentState, nextState, direction, reward, gameOver):
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-        currentState = torch.tensor(currentState, dtype=torch.float).to(device)
-        nextState = torch.tensor(nextState, dtype=torch.float).to(device)
-        direction = torch.tensor(direction, dtype=torch.long).to(device)
-        reward = torch.tensor(reward, dtype=torch.float).to(device)
+    def train(self, currentState, nextState, direction, reward, gameOver):
+        currentState, nextState, direction, reward = self.putToGPU(currentState, nextState, direction, reward)
 
         if len(currentState.shape) == 1:
-            currentState = torch.unsqueeze(currentState, 0)
-            nextState = torch.unsqueeze(nextState, 0)
-            direction = torch.unsqueeze(direction, 0)
-            reward = torch.unsqueeze(reward, 0)
-            gameOver = (gameOver, )
+            currentState, nextState, direction, reward, gameOver = self.unsqueezeData(currentState, nextState, direction, reward, gameOver)
 
         pred = self.model(currentState)
 
@@ -59,24 +50,40 @@ class DRLTrainer:
             i = torch.argmax(direction[idx]).item()
             target[idx][i] = newQ
     
+        self.backPropogation(target, pred)
+
+    def putToGPU(self, currentState, nextState, direction, reward):
+        gpu = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        return torch.tensor(currentState, dtype=torch.float).to(gpu), torch.tensor(nextState, dtype=torch.float).to(gpu), torch.tensor(direction, dtype=torch.long).to(gpu), torch.tensor(reward, dtype=torch.float).to(gpu)
+
+    def unsqueezeData(self, currentState, nextState, direction, reward, gameOver):
+        return torch.unsqueeze(currentState, 0), torch.unsqueeze(nextState, 0), torch.unsqueeze(direction, 0), torch.unsqueeze(reward, 0), (gameOver, ) 
+
+    def backPropogation(self, target, pred):
         self.optimizer.zero_grad()
         loss = self.criterion(target, pred)
         loss.backward()
 
         self.optimizer.step()
-
+        return
 
 class Agent:
 
     def __init__(self):
+        self.gpu = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.brain = CARAI(18, 3).to(self.gpu)
         self.numberOfGames = 0
         self.epsilon = 0
+        self.gameEpisodes = deque(maxlen=100000)
         self.gamma = 0.9 
-        self.memory = deque(maxlen=100000)
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self.model = CARAI(18, 3).to(self.device)
-        self.trainer = DRLTrainer(self.model, lr=0.0001, gamma=self.gamma)
+        self.drlTrainer = DRLTrainer(gamma=self.gamma, model=self.brain, lr=0.0001)
 
+    def storeGameEnvironment(self, currentState, nextState, action, reward, gameOver):
+        self.gameEpisodes.append((currentState, nextState, action, reward, gameOver))
+
+    def trainAction(self, currentState, nextState, action, reward, gameOver):
+        currentState, nextState, action, reward = np.array(currentState), np.array(nextState), np.array(action), np.array(reward)
+        self.drlTrainer.train(currentState, nextState, action, reward, gameOver)
 
     def getGameState(self, game: CARGAME):
         fieldOfView = np.zeros((18), dtype= int)
@@ -128,37 +135,21 @@ class Agent:
 
         return fieldOfView
 
-    def storeGameEnvironment(self, currentState, nextState, action, reward, gameOver):
-        self.memory.append((currentState, nextState, action, reward, gameOver))
-
     def trainEpisode(self):
-        if len(self.memory) > 1000:
-            mini_sample = random.sample(self.memory, 1000)
+        if len(self.gameEpisodes) > 1000:
+            episode = random.sample(self.gameEpisodes, 1000)
         else:
-            mini_sample = self.memory
+            episode = self.gameEpisodes
 
-        currentStates, nextStates, actions, rewards, gameOvers = zip(*mini_sample)
-        currentStates = np.array(currentStates)
-        nextStates = np.array(nextStates)
-        actions = np.array(actions)
-        rewards = np.array(rewards)
-
-        self.trainer.train_step(currentStates, nextStates, actions, rewards, gameOvers)
-
-    def trainAction(self, currentState, nextState, action, reward, gameOver):
-        currentState = np.array(currentState)
-        nextState = np.array(nextState)
-        action = np.array(action)
-        reward = np.array(reward)
-
-        self.trainer.train_step(currentState, nextState, action, reward, gameOver)
+        currentStates, nextStates, actions, rewards, gameOvers = zip(*episode)
+        currentStates, nextStates, actions, rewards = np.array(currentStates), np.array(nextStates), np.array(actions), np.array(rewards)
+        self.drlTrainer.train(currentStates, nextStates, actions, rewards, gameOvers)
 
     def getAction(self, state):
         finalAction = [0,0,0]
         stateTensor = torch.tensor(state, dtype=torch.float)
-        stateTensor = torch.unsqueeze(stateTensor, 0)
-        stateTensor = stateTensor.to(self.device)
-        predictedAction = self.model(stateTensor)
+        stateTensor = stateTensor.to(self.gpu)
+        predictedAction = self.brain(stateTensor)
         finalAction[torch.argmax(predictedAction).item()] = 1
 
         return finalAction
@@ -190,7 +181,7 @@ def train():
 
             if score > record:
                 record = score
-                agent.model.save()
+                agent.brain.save()
 
             print('Game', agent.numberOfGames, 'Score', score, 'Record:', record)
 
